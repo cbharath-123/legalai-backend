@@ -17,12 +17,78 @@ from app.rag.prompts import SYSTEM_PROMPT
 logger = structlog.get_logger(__name__)
 
 
+def _fix_ocr_words_in_output(text: str) -> str:
+    """Fix common OCR-broken German words that the LLM may have copied."""
+    fixes = [
+        (r'\bstraf\s+recht\s*lich\w*', lambda m: m.group().replace(' ', '')),
+        (r'\bHaft\s+ung', 'Haftung'),
+        (r'\bV\s*ors\s*atz', 'Vorsatz'),
+        (r'\bF\s*ah\s*rl\s*äss\s*ig\s*keit', 'Fahrlässigkeit'),
+        (r'\bTat\s+bestand', 'Tatbestand'),
+        (r'\bRe\s*chts\s*wid\s*rig\s*keit', 'Rechtswidrigkeit'),
+        (r'\bSch\s+uld', 'Schuld'),
+        (r'\bStr\s*af\s*bar\s*keit', 'Strafbarkeit'),
+        (r'\bStr\s+af\s+maß', 'Strafmaß'),
+        (r'\bRechts\s*anw\s*alt', 'Rechtsanwalt'),
+        (r'\bVerein\s*barung', 'Vereinbarung'),
+        (r'\bRecht\s*fert\s*igungs\s*grund', 'Rechtfertigungsgrund'),
+        (r'\bNot\s+wehr', 'Notwehr'),
+        (r'\bNot\s+stand', 'Notstand'),
+        (r'\bBe\s*geh\s*ung', 'Begehung'),
+        (r'\bver\s*wirk\s*lich\s*ung', 'Verwirklichung'),
+        (r'\bS\s*org\s*falt', 'Sorgfalt'),
+        (r'\bUm\s*stände', 'Umstände'),
+        (r'\bSch\s*uld\s*un\s*fähig\s*keit', 'Schuldunfähigkeit'),
+        (r'\bgesetz\s*buch', 'gesetzbuch'),
+        (r'\bdefini\s*ert', 'definiert'),
+        (r'\bgehand\s*elt', 'gehandelt'),
+        (r'\bschuld\s*haft', 'schuldhaft'),
+        (r'\bSt\s+ra\s*f\b', 'Straf'),
+        (r'\bRe\s+chts\b', 'Rechts'),
+        (r'\bW\s+ollen', 'Wollen'),
+        (r'\bTä\s+ters?', lambda m: m.group().replace(' ', '')),
+        (r'\bEins\s+icht', 'Einsicht'),
+        (r'\bpers\s*önlich\w*', lambda m: m.group().replace(' ', '')),
+        (r'\bAllgeme\s*ine?', lambda m: m.group().replace(' ', '')),
+    ]
+    for pattern, repl in fixes:
+        if callable(repl):
+            text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+        else:
+            text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+
+    # Rejoin single-letter fragments: "V ors atz" pattern
+    for _ in range(5):
+        new_text = re.sub(
+            r'\b([A-ZÄÖÜa-zäöüß]{2,})\s+([a-zäöüß]{1,4})\b(?=\s|[.,;:!?)]|$)',
+            r'\1\2',
+            text,
+        )
+        if new_text == text:
+            break
+        text = new_text
+    return text
+
+
 def _fix_markdown(text: str) -> str:
-    """Fix malformed markdown patterns in LLM output."""
+    """Fix malformed markdown patterns and OCR artifacts in LLM output."""
     # Fix bold markers with inner spaces: "** text **" → "**text**"
     text = re.sub(r"\*\*\s+(.+?)\s+\*\*", r"**\1**", text)
+    # Fix bold markers wrapping words with inner spaces: "**V ors atz**" → "**Vorsatz**"
+    def _fix_bold_content(m: re.Match) -> str:
+        inner = m.group(1)
+        # Rejoin broken words inside bold markers
+        for _ in range(5):
+            new = re.sub(r'([A-ZÄÖÜa-zäöüß]{1,})\s+([a-zäöüß]{1,4})\b', r'\1\2', inner)
+            if new == inner:
+                break
+            inner = new
+        return f"**{inner}**"
+    text = re.sub(r"\*\*(.+?)\*\*", _fix_bold_content, text)
     # Fix numbered list items with extra spaces: "1 ." → "1."
     text = re.sub(r"(\d+)\s+\.", r"\1.", text)
+    # Apply OCR word fixes to the full output
+    text = _fix_ocr_words_in_output(text)
     return text
 
 
